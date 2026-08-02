@@ -83,6 +83,29 @@ local BUILTIN_KEEP = {
 	[6948] = true, -- Hearthstone
 }
 
+-- Sub-groups for the big REVIEW pile, matched against stable substrings of the
+-- reason strings above so like items can be handled in batches.
+local TAG_PATTERNS = {
+	{ "quest item",           "Quest leftovers" },
+	{ "starts a quest",       "Unstarted quests" },
+	{ "utility/novelty",      "Utility & novelty gadgets" },
+	{ "outdated soulbound",   "Old gear - check transmog" },
+	{ "BOUND crafting",       "Bound crafting materials" },
+	{ "token/teleport/curio", "Old tokens & curios" },
+	{ "tabard/shirt",         "Tabards & shirts" },
+	{ "last-expansion",       "Last-expansion consumables" },
+	{ "openable",             "Openable containers" },
+	{ "holiday",              "Holiday items" },
+	{ "no current-content",   "Misc old items" },
+}
+
+local function ReviewTag(reason)
+	for _, p in ipairs(TAG_PATTERNS) do
+		if reason and reason:find(p[1], 1, true) then return p[2] end
+	end
+	return "Other"
+end
+
 local function xpacName(id)
 	return _G["EXPANSION_NAME" .. tostring(id)] or ("expansion " .. tostring(id))
 end
@@ -113,6 +136,7 @@ local function InitDB()
 	if BagPrauditDB.settings.showKeep == nil then
 		BagPrauditDB.settings.showKeep = false
 	end
+	BagPrauditDB.settings.collapsed = BagPrauditDB.settings.collapsed or {}
 	BT.db = BagPrauditDB
 end
 
@@ -416,6 +440,7 @@ local function BuildEntry(bag, slot)
 	e.tooltip = GetTooltipLines(bag, slot)
 
 	e.verdict, e.reason = Classify(e)
+	e.tag = ReviewTag(e.reason)
 	return e
 end
 
@@ -435,6 +460,9 @@ function BT:Scan(onDone)
 			table.sort(self.results, function(a, b)
 				if a.verdict ~= b.verdict then
 					return VERDICT_ORDER[a.verdict] < VERDICT_ORDER[b.verdict]
+				end
+				if (a.tag or "") ~= (b.tag or "") then
+					return (a.tag or "") < (b.tag or "")
 				end
 				if (a.name or "") ~= (b.name or "") then
 					return (a.name or "") < (b.name or "")
@@ -652,7 +680,7 @@ local function CreateMainFrame()
 
 	f.hint = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
 	f.hint:SetPoint("BOTTOMRIGHT", -16, 18)
-	f.hint:SetText("X = delete (confirm)  |  hover row for tooltip")
+	f.hint:SetText("click header to collapse  |  X = delete (confirm)  |  hover row for tooltip")
 
 	return f
 end
@@ -700,6 +728,8 @@ local function AcquireRow(index, parent)
 		if self.entry then
 			GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
 			GameTooltip:SetBagItem(self.entry.bag, self.entry.slot)
+			GameTooltip:AddLine(" ")
+			GameTooltip:AddLine("|cff6699ffBag Praudit:|r " .. (self.entry.reason or ""), 1, 0.82, 0, true)
 			GameTooltip:Show()
 		end
 	end)
@@ -718,57 +748,93 @@ local headerPool = {}
 local function AcquireHeader(index, parent)
 	local h = headerPool[index]
 	if h then return h end
-	h = parent:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-	h:SetJustifyH("LEFT")
+	h = CreateFrame("Button", nil, parent)
+	h:SetSize(690, 20)
+	h:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight", "ADD")
+	h.label = h:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+	h.label:SetPoint("LEFT", 2, 0)
+	h.label:SetJustifyH("LEFT")
+	h:SetScript("OnClick", function(btn)
+		local cset = BT.db.settings.collapsed
+		cset[btn.verdict] = not cset[btn.verdict] or nil
+		BT:RenderList()
+	end)
 	headerPool[index] = h
 	return h
+end
+
+local subheaderPool = {}
+local function AcquireSubheader(index, parent)
+	local s = subheaderPool[index]
+	if s then return s end
+	s = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+	s:SetJustifyH("LEFT")
+	s:SetTextColor(0.75, 0.75, 0.75)
+	subheaderPool[index] = s
+	return s
 end
 
 function BT:RenderList()
 	local f = self.ui
 	for _, r in ipairs(rowPool) do r:Hide() end
 	for _, h in ipairs(headerPool) do h:Hide() end
+	for _, s in ipairs(subheaderPool) do s:Hide() end
 
+	local c = self:Counts()
+	local collapsed = self.db.settings.collapsed
 	local y = -4
-	local rowIdx, headerIdx = 0, 0
-	local lastVerdict
+	local rowIdx, headerIdx, subIdx = 0, 0, 0
+	local lastVerdict, lastTag
 
 	for _, e in ipairs(self.results) do
 		local show = e.verdict ~= "KEEP" or self.db.settings.showKeep
 		if show then
 			if e.verdict ~= lastVerdict then
 				lastVerdict = e.verdict
+				lastTag = nil
 				headerIdx = headerIdx + 1
 				local h = AcquireHeader(headerIdx, f.content)
 				h:SetPoint("TOPLEFT", 4, y - 4)
-				h:SetText(string.format("|c%s%s|r", VERDICT_COLOR[e.verdict], VERDICT_LABEL[e.verdict]))
+				h.verdict = e.verdict
+				h.label:SetText(string.format("|c%s[%s] %s (%d)|r",
+					VERDICT_COLOR[e.verdict], collapsed[e.verdict] and "+" or "-",
+					VERDICT_LABEL[e.verdict], c[e.verdict] or 0))
 				h:Show()
 				y = y - 24
 			end
-			rowIdx = rowIdx + 1
-			local row = AcquireRow(rowIdx, f.content)
-			row:SetPoint("TOPLEFT", 4, y)
-			row.entry = e
-			row.icon:SetTexture(e.icon or 134400)
-			local countStr = (e.count or 1) > 1 and (" x" .. e.count) or ""
-			row.text:SetText((e.link or e.name or "?") .. countStr)
-			row.reason:SetText(e.reason or "")
-			row.keepBtn.itemID = e.itemID
-			row.keepBtn:SetText(self.db.keepList[e.itemID] and "Unkeep" or "Keep")
-			row.delBtn.entry = e
-			if e.verdict == "DELETE" or e.verdict == "REVIEW" then
-				row.delBtn:Show()
-			else
-				row.delBtn:Hide()
+			if not collapsed[e.verdict] then
+				if e.verdict == "REVIEW" and e.tag ~= lastTag then
+					lastTag = e.tag
+					subIdx = subIdx + 1
+					local s = AcquireSubheader(subIdx, f.content)
+					s:SetPoint("TOPLEFT", 16, y - 3)
+					s:SetText(e.tag or "Other")
+					s:Show()
+					y = y - 18
+				end
+				rowIdx = rowIdx + 1
+				local row = AcquireRow(rowIdx, f.content)
+				row:SetPoint("TOPLEFT", 4, y)
+				row.entry = e
+				row.icon:SetTexture(e.icon or 134400)
+				local countStr = (e.count or 1) > 1 and (" x" .. e.count) or ""
+				row.text:SetText((e.link or e.name or "?") .. countStr)
+				row.reason:SetText(e.reason or "")
+				row.keepBtn.itemID = e.itemID
+				row.keepBtn:SetText(self.db.keepList[e.itemID] and "Unkeep" or "Keep")
+				row.delBtn.entry = e
+				if e.verdict == "DELETE" or e.verdict == "REVIEW" then
+					row.delBtn:Show()
+				else
+					row.delBtn:Hide()
+				end
+				row:Show()
+				y = y - ROW_HEIGHT
 			end
-			row:Show()
-			y = y - ROW_HEIGHT
 		end
 	end
 
 	f.content:SetHeight(-y + 10)
-
-	local c = self:Counts()
 	f.summary:SetText(string.format(
 		"%d items scanned  |  |c%sSELL %d|r (worth %s)  |c%sDELETE %d|r  |c%sREVIEW %d|r  |c%sBANK %d|r  |c%sAH %d|r  |c%sKEEP %d|r",
 		c.total,
