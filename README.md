@@ -26,11 +26,14 @@ Nothing is ever sold or deleted automatically.
 
 ## Usage
 
-- `/praudit` (or `/bpr`) — open/close the triage window (scans automatically)
+- `/praudit` (or `/bpr`) — open/close the audit window (scans your bags)
+- `/praudit bank` — audit your bank, bank tabs, and warband tabs (bank must be open; selling stays bags-only, closing the bank switches back)
 - `/praudit export` — copyable text report of the scan (Ctrl+A, Ctrl+C)
 - `/praudit reset` — clear your personal keep list
 - `/praudit batch` — toggle selling in buyback-safe batches of 12 (default on)
 - `/praudit help` — command list
+
+The summary shows a **junk score**: the percentage of scanned slots flagged as clearable (SELL+DELETE+REVIEW+AH), with how many are freeable right now.
 
 In the window:
 
@@ -60,4 +63,5 @@ character context - enough to tune misclassified rules without in-game access.
 - "Old expansion" detection uses item data's expansionID; expansion-agnostic items
   report 0 (Classic) and land in REVIEW rather than SELL by design.
 - Battle pet duplicates are not detected (all cages are KEEP).
-- Bank/warband bank/void storage contents are not scanned - bags only.
+- Gear transmog checks use PlayerCanCollectSource: uncollected-but-learnable gear says "EQUIP IT ONCE", wrong-class gear says bank it for an alt, and jewelry/trinkets skip the check (no appearance).
+- Void storage is not scanned; bank scanning requires the bank window to be open.

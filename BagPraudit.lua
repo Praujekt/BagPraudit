@@ -89,6 +89,8 @@ local TAG_PATTERNS = {
 	{ "quest item",           "Quest leftovers" },
 	{ "starts a quest",       "Unstarted quests" },
 	{ "utility/novelty",      "Utility & novelty gadgets" },
+	{ "EQUIP IT ONCE",        "Equip for transmog, then sell" },
+	{ "not collectible by",   "Mog locked to another class" },
 	{ "outdated soulbound",   "Old gear - check transmog" },
 	{ "BOUND crafting",       "Bound crafting materials" },
 	{ "token/teleport/curio", "Old tokens & curios" },
@@ -182,12 +184,30 @@ local function TooltipHasExact(lines, needle)
 	return false
 end
 
-local function HasAppearance(link)
-	if C_TransmogCollection and C_TransmogCollection.PlayerHasTransmogByItemInfo then
-		local ok, has = pcall(C_TransmogCollection.PlayerHasTransmogByItemInfo, link)
-		if ok then return has end
+-- Slots with no transmog appearance: nothing is lost by selling these.
+local NO_APPEARANCE_EQUIP = {
+	INVTYPE_FINGER = true, INVTYPE_TRINKET = true, INVTYPE_NECK = true,
+}
+
+-- Returns "collected" | "learnable" | "notforclass" | "uncollected" | nil
+local function AppearanceStatus(link)
+	if not (link and C_TransmogCollection
+		and C_TransmogCollection.PlayerHasTransmogByItemInfo) then
+		return nil
 	end
-	return nil -- unknown
+	local ok, has = pcall(C_TransmogCollection.PlayerHasTransmogByItemInfo, link)
+	if not ok then return nil end
+	if has then return "collected" end
+	if C_TransmogCollection.GetItemInfo and C_TransmogCollection.PlayerCanCollectSource then
+		local ok2, _, sourceID = pcall(C_TransmogCollection.GetItemInfo, link)
+		if ok2 and sourceID then
+			local ok3, hasData, canCollect = pcall(C_TransmogCollection.PlayerCanCollectSource, sourceID)
+			if ok3 and hasData ~= nil then
+				return canCollect and "learnable" or "notforclass"
+			end
+		end
+	end
+	return "uncollected"
 end
 
 -- ---------------------------------------------------------------------------
@@ -296,13 +316,18 @@ local function Classify(e)
 		local realIlvl = e.detailedIlvl or e.itemLevel or 0
 		if e.isBound then
 			if isOldXpac(e.expacID) or (BT.equippedIlvl > 0 and realIlvl < BT.equippedIlvl * 0.85) then
-				local has = HasAppearance(e.link)
-				if has == false then
-					return "REVIEW", string.format(
-						"outdated soulbound gear (ilvl %d vs your %d), appearance NOT collected - verify the mog unlocked, then sell; bank instead if the source is gone from the game",
-						realIlvl, BT.equippedIlvl)
+				if NO_APPEARANCE_EQUIP[e.equipLoc or ""] then
+					return "SELL", string.format("outdated jewelry/trinket (ilvl %d vs your %d) - no appearance to lose", realIlvl, BT.equippedIlvl)
 				end
-				return "SELL", string.format("outdated soulbound gear (ilvl %d vs your %d), appearance collected", realIlvl, BT.equippedIlvl)
+				local status = AppearanceStatus(e.link)
+				if status == "collected" then
+					return "SELL", string.format("outdated soulbound gear (ilvl %d vs your %d), appearance collected", realIlvl, BT.equippedIlvl)
+				elseif status == "learnable" then
+					return "REVIEW", string.format("outdated gear (ilvl %d) - EQUIP IT ONCE to learn its appearance, then sell", realIlvl)
+				elseif status == "notforclass" then
+					return "REVIEW", string.format("outdated gear (ilvl %d), appearance not collectible by this character (class/armor type) - bank for an alt or accept the loss", realIlvl)
+				end
+				return "REVIEW", string.format("outdated soulbound gear (ilvl %d vs your %d), appearance status unknown - check before selling", realIlvl, BT.equippedIlvl)
 			end
 			return "KEEP", "current-content gear"
 		end
@@ -444,10 +469,44 @@ local function BuildEntry(bag, slot)
 	return e
 end
 
+-- Bank container IDs vary across bank reworks (legacy bank+bags, 11.2+
+-- character tabs, warband/account tabs). Collect every candidate the client's
+-- enum knows about; unavailable ones report 0 slots and scan as empty.
+local function BankBags()
+	local E = (Enum and Enum.BagIndex) or {}
+	local seen, bags = {}, {}
+	local function add(v)
+		if type(v) == "number" and not seen[v] then
+			seen[v] = true
+			bags[#bags + 1] = v
+		end
+	end
+	add(E.Bank or BANK_CONTAINER or -1)
+	add(E.Reagentbank); add(E.ReagentBank); add(REAGENTBANK_CONTAINER)
+	for i = 1, 7 do add(E["BankBag_" .. i]) end
+	for i = 1, 6 do add(E["CharacterBankTab_" .. i]) end
+	for i = 1, 5 do add(E["AccountBankTab_" .. i]) end
+	return bags
+end
+
+local function GetScanBags(mode)
+	if mode == "bank" then return BankBags() end
+	local bags = {}
+	for bag = 0, (NUM_TOTAL_EQUIPPED_BAG_SLOTS or 5) do
+		bags[#bags + 1] = bag
+	end
+	return bags
+end
+
 function BT:Scan(onDone)
 	if InCombatLockdown() then
 		chat("Cannot scan during combat (item data is restricted in 12.x combat lockdown).")
 		return
+	end
+	self.scanMode = self.scanMode or "bags"
+	if self.scanMode == "bank" and not self.bankOpen then
+		chat("The bank is closed - bank contents are only readable while it is open. Showing bags instead.")
+		self.scanMode = "bags"
 	end
 
 	wipe(self.results)
@@ -473,8 +532,7 @@ function BT:Scan(onDone)
 		end
 	end
 
-	local lastBag = NUM_TOTAL_EQUIPPED_BAG_SLOTS or 5
-	for bag = 0, lastBag do
+	for _, bag in ipairs(GetScanBags(self.scanMode)) do
 		local numSlots = C_Container.GetContainerNumSlots(bag) or 0
 		for slot = 1, numSlots do
 			local probe = C_Container.GetContainerItemInfo(bag, slot)
@@ -516,6 +574,10 @@ end
 -- ---------------------------------------------------------------------------
 
 function BT:SellFlagged()
+	if self.scanMode == "bank" then
+		chat("Selling works on the bags scan only - the vendor and the bank cannot both be open.")
+		return
+	end
 	if not self.merchantOpen then
 		chat("Open a vendor first, then press the sell button.")
 		return
@@ -590,9 +652,9 @@ function BT:BuildExport()
 	local playerName = UnitName("player") or "?"
 	local realm = GetRealmName and GetRealmName() or "?"
 	lines[#lines + 1] = string.format(
-		"BagPraudit %s export | %s-%s | level %d | equipped ilvl %d | client %s | xpacLevel %d | %s",
+		"BagPraudit %s export | %s-%s | level %d | equipped ilvl %d | client %s | xpacLevel %d | scope %s | %s",
 		VERSION, playerName, realm, UnitLevel("player") or 0, self.equippedIlvl or 0,
-		(GetBuildInfo()), CUR_XPAC, date("%Y-%m-%d %H:%M"))
+		(GetBuildInfo()), CUR_XPAC, self.scanMode or "bags", date("%Y-%m-%d %H:%M"))
 	lines[#lines + 1] = "verdict | bag:slot | itemID | count | class/sub | xpac | ilvl | name | reason"
 	for _, e in ipairs(self.results) do
 		lines[#lines + 1] = string.format("%s | %d:%d | %d | %d | %s/%s | %s | %s | %s | %s",
@@ -637,11 +699,14 @@ local function CreateMainFrame()
 	f.summary = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 	f.summary:SetPoint("TOP", 0, -40)
 
+	f.junk = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+	f.junk:SetPoint("TOP", 0, -56)
+
 	local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
 	close:SetPoint("TOPRIGHT", -6, -6)
 
 	f.scroll = CreateFrame("ScrollFrame", "BagPrauditScroll", f, "UIPanelScrollFrameTemplate")
-	f.scroll:SetPoint("TOPLEFT", 14, -60)
+	f.scroll:SetPoint("TOPLEFT", 14, -74)
 	f.scroll:SetPoint("BOTTOMRIGHT", -34, 48)
 
 	f.content = CreateFrame("Frame", nil, f.scroll)
@@ -835,6 +900,15 @@ function BT:RenderList()
 	end
 
 	f.content:SetHeight(-y + 10)
+
+	f.title:SetText(self.scanMode == "bank" and "Bag Praudit - Bank" or "Bag Praudit")
+
+	local flagged = c.SELL + c.DELETE + c.REVIEW + c.AH
+	local pct = c.total > 0 and math.floor(flagged / c.total * 100 + 0.5) or 0
+	f.junk:SetText(string.format(
+		"Junk score: |cffffd100%d%%|r  -  %d slot(s) freeable now, %d to review, %d for the AH",
+		pct, c.SELL + c.DELETE, c.REVIEW, c.AH))
+
 	f.summary:SetText(string.format(
 		"%d items scanned  |  |c%sSELL %d|r (worth %s)  |c%sDELETE %d|r  |c%sREVIEW %d|r  |c%sBANK %d|r  |c%sAH %d|r  |c%sKEEP %d|r",
 		c.total,
@@ -846,11 +920,18 @@ function BT:RenderList()
 		VERDICT_COLOR.KEEP, c.KEEP))
 
 	f.showKeep:SetChecked(self.db.settings.showKeep)
-	f.sellBtn:SetEnabled(self.merchantOpen and c.SELL > 0)
-	f.sellBtn:SetText(self.merchantOpen and "Sell flagged" or "Sell flagged (need vendor)")
+	if self.scanMode == "bank" then
+		f.sellBtn:SetEnabled(false)
+		f.sellBtn:SetText("Sell (bags mode only)")
+	else
+		f.sellBtn:SetEnabled(self.merchantOpen and c.SELL > 0)
+		f.sellBtn:SetText(self.merchantOpen and "Sell flagged" or "Sell flagged (need vendor)")
+	end
 end
 
-function BT:RefreshUI(rescan)
+function BT:RefreshUI(rescan, mode)
+	if mode then self.scanMode = mode end
+	self.scanMode = self.scanMode or "bags"
 	if not self.ui then self.ui = CreateMainFrame() end
 	self.ui:Show()
 	if rescan or #self.results == 0 then
@@ -914,6 +995,8 @@ BT:RegisterEvent("PLAYER_LOGIN")
 BT:RegisterEvent("MERCHANT_SHOW")
 BT:RegisterEvent("MERCHANT_CLOSED")
 BT:RegisterEvent("BAG_UPDATE_DELAYED")
+BT:RegisterEvent("BANKFRAME_OPENED")
+BT:RegisterEvent("BANKFRAME_CLOSED")
 
 BT:SetScript("OnEvent", function(self, event)
 	if event == "PLAYER_LOGIN" then
@@ -925,6 +1008,21 @@ BT:SetScript("OnEvent", function(self, event)
 	elseif event == "MERCHANT_CLOSED" then
 		self.merchantOpen = false
 		if self.ui and self.ui:IsShown() then self:RenderList() end
+	elseif event == "BANKFRAME_OPENED" then
+		self.bankOpen = true
+		if not self.bankHintDone then
+			self.bankHintDone = true
+			chat("Bank open - /praudit bank to audit your bank and warband tabs.")
+		end
+	elseif event == "BANKFRAME_CLOSED" then
+		self.bankOpen = false
+		if self.scanMode == "bank" then
+			self.scanMode = "bags"
+			if self.ui and self.ui:IsShown() then
+				chat("Bank closed - switching back to the bags scan.")
+				self:Scan(function() BT:RenderList() end)
+			end
+		end
 	elseif event == "BAG_UPDATE_DELAYED" then
 		if self.ui and self.ui:IsShown() and not self.rescanQueued then
 			self.rescanQueued = true
@@ -943,7 +1041,14 @@ SLASH_BAGPRAUDIT2 = "/bagpraudit"
 SLASH_BAGPRAUDIT3 = "/bpr"
 SlashCmdList.BAGPRAUDIT = function(msg)
 	msg = (msg or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
-	if msg == "export" then
+	if msg == "bank" then
+		if not (BT.bankOpen or (BankFrame and BankFrame:IsShown())) then
+			chat("Open your bank first, then run /praudit bank.")
+			return
+		end
+		BT.bankOpen = true
+		BT:RefreshUI(true, "bank")
+	elseif msg == "export" then
 		if #BT.results == 0 then
 			BT:Scan(function() BT:ShowExport() end)
 		else
@@ -958,6 +1063,7 @@ SlashCmdList.BAGPRAUDIT = function(msg)
 		chat("Sell in buyback-safe batches of 12: " .. tostring(BT.db.settings.sellBatch12))
 	elseif msg == "help" then
 		chat("/praudit - open the audit window (scans your bags)")
+		chat("/praudit bank - audit your bank + warband tabs (bank must be open)")
 		chat("/praudit export - copyable text report of the last scan")
 		chat("/praudit reset - clear your keep list")
 		chat("/praudit batch - toggle selling in batches of 12 (buyback safety)")
@@ -965,7 +1071,7 @@ SlashCmdList.BAGPRAUDIT = function(msg)
 		if BT.ui and BT.ui:IsShown() then
 			BT.ui:Hide()
 		else
-			BT:RefreshUI(true)
+			BT:RefreshUI(true, "bags")
 		end
 	end
 end
