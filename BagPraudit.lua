@@ -18,6 +18,8 @@
 --------------------------------------------------------------------------------
 
 local ADDON_NAME = ...
+local VERSION = (C_AddOns and C_AddOns.GetAddOnMetadata
+	and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "?"
 
 local BT = CreateFrame("Frame", "BagPrauditEventFrame")
 BT.results = {}
@@ -148,6 +150,14 @@ local function TooltipHas(lines, needle)
 	return false
 end
 
+local function TooltipHasExact(lines, needle)
+	if not needle then return false end
+	for _, text in ipairs(lines) do
+		if text == needle then return true end
+	end
+	return false
+end
+
 local function HasAppearance(link)
 	if C_TransmogCollection and C_TransmogCollection.PlayerHasTransmogByItemInfo then
 		local ok, has = pcall(C_TransmogCollection.PlayerHasTransmogByItemInfo, link)
@@ -190,8 +200,9 @@ local function Classify(e)
 	end
 
 	-- Quest-bound rewards from old expansions: if the quest line was removed
-	-- or is unrepeatable, a deleted copy is gone for good.
-	if (e.bindType or 0) == 4 and isOldXpac(e.expacID) then
+	-- or is unrepeatable, a deleted copy is gone for good. Actual quest items
+	-- (classID 12) are excluded - those are leftovers, handled below.
+	if (e.bindType or 0) == 4 and isOldXpac(e.expacID) and e.classID ~= CLASS_QUEST then
 		return "BANK", ("quest-bound reward from %s - may be impossible to reobtain; bank if it means something to you"):format(xpacName(e.expacID))
 	end
 
@@ -232,6 +243,9 @@ local function Classify(e)
 	local alreadyKnown = ITEM_SPELL_KNOWN and TooltipHas(e.tooltip, ITEM_SPELL_KNOWN)
 	if PlayerHasToy and C_ToyBox and C_ToyBox.GetToyInfo and C_ToyBox.GetToyInfo(e.itemID) then
 		if PlayerHasToy(e.itemID) then
+			if e.noValue or (e.sellPrice or 0) == 0 then
+				return "DELETE", "toy already in your Toy Box, no vendor value"
+			end
 			return "SELL", "toy already in your Toy Box"
 		end
 		return "KEEP", "toy not yet learned - use it"
@@ -250,6 +264,11 @@ local function Classify(e)
 
 	-- Equipment
 	if e.classID == 2 or e.classID == 4 then -- Weapon / Armor
+		-- Tabards and shirts are pure cosmetics: item level is meaningless and
+		-- many (rep, event, questline) are painful or impossible to reacquire.
+		if e.equipLoc == "INVTYPE_TABARD" or e.equipLoc == "INVTYPE_BODY" then
+			return "REVIEW", "cosmetic tabard/shirt - ignore its ilvl; many are hard to reacquire, so bank unless you know a vendor still sells it"
+		end
 		local realIlvl = e.detailedIlvl or e.itemLevel or 0
 		if e.isBound then
 			if isOldXpac(e.expacID) or (BT.equippedIlvl > 0 and realIlvl < BT.equippedIlvl * 0.85) then
@@ -269,8 +288,13 @@ local function Classify(e)
 		return "REVIEW", "unbound gear"
 	end
 
-	-- Consumables (food, potions, flasks, bandages, scrolls...)
+	-- Consumables. Stat consumables (potions/flasks/food) age out with their
+	-- expansion, but generic/"Other" utility consumables (gliders, disguises,
+	-- illusions, gadgets) usually keep working forever - never auto-sell those.
 	if e.classID == CLASS_CONSUMABLE then
+		if (e.subclassID == 0 or e.subclassID == 8) and isOldXpac(e.expacID) then
+			return "REVIEW", ("utility/novelty consumable from %s (glider/disguise/gadget?) - many still work; test it before tossing"):format(xpacName(e.expacID))
+		end
 		if isPrevXpac(e.expacID) then
 			return "REVIEW", ("last-expansion consumable (%s) - may still help while leveling"):format(xpacName(e.expacID))
 		end
@@ -287,6 +311,9 @@ local function Classify(e)
 	if e.classID == CLASS_TRADEGOODS or e.classID == CLASS_REAGENT
 		or e.classID == CLASS_GEM or e.classID == CLASS_ENHANCE or e.isCraftingReagent then
 		if isOldXpac(e.expacID) then
+			if e.isBound or ACCOUNT_BINDS[e.bindType or 0] then
+				return "REVIEW", ("old BOUND crafting material (%s) - cannot be auctioned; vendor it or keep for legacy crafting"):format(xpacName(e.expacID))
+			end
 			return "AH", ("old crafting material (%s) - no current use; old mats often sell on the AH, otherwise vendor"):format(xpacName(e.expacID))
 		end
 		return "KEEP", "current crafting material"
@@ -316,8 +343,11 @@ local function Classify(e)
 			return "KEEP", "mount not yet learned - use it"
 		end
 		-- Unique old curios tend to be one-time acquisitions (event rewards,
-		-- keepsakes) - once deleted they are usually gone.
-		if isOldXpac(e.expacID) and ITEM_UNIQUE and TooltipHas(e.tooltip, ITEM_UNIQUE) then
+		-- keepsakes) - once deleted they are usually gone. Requires an exact
+		-- "Unique" tooltip line (not "Unique-Equipped"/"Unique (20)") and a
+		-- single copy: a stack of 6 is not a keepsake.
+		if isOldXpac(e.expacID) and (e.count or 1) == 1
+			and ITEM_UNIQUE and TooltipHasExact(e.tooltip, ITEM_UNIQUE) then
 			return "BANK", ("unique %s keepsake - likely one-time acquisition; bank rather than delete"):format(xpacName(e.expacID))
 		end
 		if isOldXpac(e.expacID) and (e.quality or 1) >= 2 then
@@ -532,8 +562,8 @@ function BT:BuildExport()
 	local playerName = UnitName("player") or "?"
 	local realm = GetRealmName and GetRealmName() or "?"
 	lines[#lines + 1] = string.format(
-		"BagPraudit 1.0.0 export | %s-%s | level %d | equipped ilvl %d | client %s | xpacLevel %d | %s",
-		playerName, realm, UnitLevel("player") or 0, self.equippedIlvl or 0,
+		"BagPraudit %s export | %s-%s | level %d | equipped ilvl %d | client %s | xpacLevel %d | %s",
+		VERSION, playerName, realm, UnitLevel("player") or 0, self.equippedIlvl or 0,
 		(GetBuildInfo()), CUR_XPAC, date("%Y-%m-%d %H:%M"))
 	lines[#lines + 1] = "verdict | bag:slot | itemID | count | class/sub | xpac | ilvl | name | reason"
 	for _, e in ipairs(self.results) do
@@ -574,7 +604,7 @@ local function CreateMainFrame()
 
 	f.title = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
 	f.title:SetPoint("TOP", 0, -16)
-	f.title:SetText("BagPraudit")
+	f.title:SetText("Bag Praudit")
 
 	f.summary = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 	f.summary:SetPoint("TOP", 0, -40)
@@ -622,7 +652,7 @@ local function CreateMainFrame()
 
 	f.hint = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
 	f.hint:SetPoint("BOTTOMRIGHT", -16, 18)
-	f.hint:SetText("Keep = never flag again  |  X = delete (confirm)  |  hover a row for tooltip")
+	f.hint:SetText("X = delete (confirm)  |  hover row for tooltip")
 
 	return f
 end
