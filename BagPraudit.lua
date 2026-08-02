@@ -91,6 +91,7 @@ local TAG_PATTERNS = {
 	{ "utility/novelty",      "Utility & novelty gadgets" },
 	{ "EQUIP IT ONCE",        "Equip for transmog, then sell" },
 	{ "not collectible by",   "Mog locked to another class" },
+	{ "spare bag",            "Spare bags" },
 	{ "outdated soulbound",   "Old gear - check transmog" },
 	{ "BOUND crafting",       "Bound crafting materials" },
 	{ "token/teleport/curio", "Old tokens & curios" },
@@ -238,8 +239,12 @@ local function Classify(e)
 
 	-- Sentimental / irreplaceable: old legendaries and artifact-quality items
 	-- (Shadowlands legendaries, legion artifacts, quest-line mementos...) are
-	-- usually impossible to reacquire once deleted.
-	if (e.quality == LEGENDARY or e.quality == ARTIFACT) and isOldXpac(e.expacID) then
+	-- usually impossible to reacquire once deleted. Crafting materials and
+	-- recipes that merely carry legendary quality (Korthite Crystal etc.) are
+	-- farmable - they fall through to the material rules instead.
+	if (e.quality == LEGENDARY or e.quality == ARTIFACT) and isOldXpac(e.expacID)
+		and e.classID ~= CLASS_TRADEGOODS and e.classID ~= CLASS_REAGENT
+		and e.classID ~= CLASS_RECIPE and not e.isCraftingReagent then
 		return "BANK", ("old %s-era legendary/artifact - cannot be reacquired; warband-bank it, never delete"):format(xpacName(e.expacID))
 	end
 
@@ -304,6 +309,11 @@ local function Classify(e)
 	-- Account-bound: safe to park on an alt or in the warband bank
 	if ACCOUNT_BINDS[e.bindType or 0] then
 		return "KEEP", "account-bound (warbound) - usable across your warband"
+	end
+
+	-- Spare bags (class 1: containers)
+	if e.classID == 1 then
+		return "REVIEW", "spare bag - equip it, send it to an alt, or vendor it if it is smaller than what you use"
 	end
 
 	-- Equipment
@@ -516,6 +526,26 @@ function BT:Scan(onDone)
 	local pending, loopDone = 0, false
 	local function finishIfReady()
 		if loopDone and pending == 0 then
+			-- Merge identical stacks (same item, verdict, and reason) into one
+			-- row; battle pets merge by hyperlink since one cage itemID holds
+			-- many different pets.
+			local merged, byKey = {}, {}
+			for _, e in ipairs(self.results) do
+				local key = tostring(e.isBattlePet and e.link or e.itemID)
+					.. "|" .. e.verdict .. "|" .. (e.reason or "")
+				local m = byKey[key]
+				if m then
+					m.count = (m.count or 1) + (e.count or 1)
+					m.stacks = (m.stacks or 1) + 1
+					m.slots[#m.slots + 1] = { bag = e.bag, slot = e.slot }
+				else
+					e.slots = { { bag = e.bag, slot = e.slot } }
+					e.stacks = 1
+					byKey[key] = e
+					merged[#merged + 1] = e
+				end
+			end
+			self.results = merged
 			table.sort(self.results, function(a, b)
 				if a.verdict ~= b.verdict then
 					return VERDICT_ORDER[a.verdict] < VERDICT_ORDER[b.verdict]
@@ -583,14 +613,18 @@ function BT:SellFlagged()
 		return
 	end
 	local sold, value = 0, 0
+	local limit = self.db.settings.sellBatch12 and 12 or math.huge
 	for _, e in ipairs(self.results) do
+		if sold >= limit then break end
 		if e.verdict == "SELL" and not e.noValue then
-			local info = C_Container.GetContainerItemInfo(e.bag, e.slot)
-			if info and info.itemID == e.itemID and not info.isLocked then
-				C_Container.UseContainerItem(e.bag, e.slot)
-				sold = sold + 1
-				value = value + (e.sellPrice or 0) * (e.count or 1)
-				if self.db.settings.sellBatch12 and sold >= 12 then break end
+			for _, s in ipairs(e.slots or { { bag = e.bag, slot = e.slot } }) do
+				if sold >= limit then break end
+				local info = C_Container.GetContainerItemInfo(s.bag, s.slot)
+				if info and info.itemID == e.itemID and not info.isLocked then
+					C_Container.UseContainerItem(s.bag, s.slot)
+					sold = sold + 1
+					value = value + (e.sellPrice or 0) * (info.stackCount or 1)
+				end
 			end
 		end
 	end
@@ -606,20 +640,23 @@ function BT:SellFlagged()
 end
 
 function BT:DeleteEntry(e)
-	local info = C_Container.GetContainerItemInfo(e.bag, e.slot)
-	if not info or info.itemID ~= e.itemID then
-		chat("That slot changed since the scan - rescanning instead.")
-		self:RefreshUI(true)
-		return
+	for _, s in ipairs(e.slots or { { bag = e.bag, slot = e.slot } }) do
+		local info = C_Container.GetContainerItemInfo(s.bag, s.slot)
+		if info and info.itemID == e.itemID then
+			ClearCursor()
+			C_Container.PickupContainerItem(s.bag, s.slot)
+			if CursorHasItem() then
+				DeleteCursorItem()
+				chat("Deleted " .. (e.link or e.name)
+					.. ((e.stacks or 1) > 1 and " (one stack - click X again for the next)" or "") .. ".")
+			end
+			ClearCursor()
+			C_Timer.After(0.5, function() BT:RefreshUI(true) end)
+			return
+		end
 	end
-	ClearCursor()
-	C_Container.PickupContainerItem(e.bag, e.slot)
-	if CursorHasItem() then
-		DeleteCursorItem()
-		chat("Deleted " .. (e.link or e.name) .. ".")
-	end
-	ClearCursor()
-	C_Timer.After(0.5, function() BT:RefreshUI(true) end)
+	chat("That item moved since the scan - rescanning instead.")
+	self:RefreshUI(true)
 end
 
 function BT:ToggleKeep(itemID)
@@ -882,7 +919,13 @@ function BT:RenderList()
 				row:SetPoint("TOPLEFT", 4, y)
 				row.entry = e
 				row.icon:SetTexture(e.icon or 134400)
-				local countStr = (e.count or 1) > 1 and (" x" .. e.count) or ""
+				local countStr = ""
+				if (e.count or 1) > 1 then
+					countStr = " x" .. e.count
+					if (e.stacks or 1) > 1 then
+						countStr = countStr .. " (" .. e.stacks .. " stacks)"
+					end
+				end
 				row.text:SetText((e.link or e.name or "?") .. countStr)
 				row.reason:SetText(e.reason or "")
 				row.keepBtn.itemID = e.itemID
