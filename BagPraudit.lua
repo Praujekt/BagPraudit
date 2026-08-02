@@ -60,7 +60,7 @@ local MISC_SUB_MOUNT   = 5
 -- Account-bound Enum.ItemBind values (warbound and friends)
 local ACCOUNT_BINDS = { [7] = true, [8] = true, [9] = true }
 
-local VERDICT_ORDER = { SELL = 1, DELETE = 2, REVIEW = 3, BANK = 4, AH = 5, KEEP = 6 }
+local VERDICT_ORDER = { SELL = 1, DELETE = 2, BANK = 3, REVIEW = 4, AH = 5, KEEP = 6 }
 local VERDICT_COLOR = {
 	SELL   = "ffffd100",
 	DELETE = "ffff4040",
@@ -910,12 +910,12 @@ function BT:RenderList()
 		pct, c.SELL + c.DELETE, c.REVIEW, c.AH))
 
 	f.summary:SetText(string.format(
-		"%d items scanned  |  |c%sSELL %d|r (worth %s)  |c%sDELETE %d|r  |c%sREVIEW %d|r  |c%sBANK %d|r  |c%sAH %d|r  |c%sKEEP %d|r",
+		"%d items scanned  |  |c%sSELL %d|r (worth %s)  |c%sDELETE %d|r  |c%sBANK %d|r  |c%sREVIEW %d|r  |c%sAH %d|r  |c%sKEEP %d|r",
 		c.total,
 		VERDICT_COLOR.SELL, c.SELL, GetMoneyString and GetMoneyString(c.sellValue) or (c.sellValue .. "c"),
 		VERDICT_COLOR.DELETE, c.DELETE,
-		VERDICT_COLOR.REVIEW, c.REVIEW,
 		VERDICT_COLOR.BANK, c.BANK,
+		VERDICT_COLOR.REVIEW, c.REVIEW,
 		VERDICT_COLOR.AH, c.AH,
 		VERDICT_COLOR.KEEP, c.KEEP))
 
