@@ -70,11 +70,11 @@ local VERDICT_COLOR = {
 	KEEP   = "ff40ff40",
 }
 local VERDICT_LABEL = {
-	SELL   = "Sell at vendor",
-	DELETE = "Safe to delete (no vendor value)",
-	REVIEW = "Review by hand",
-	BANK   = "Bank it (sentimental / hard to reacquire)",
-	AH     = "Auction house candidates",
+	SELL   = "Sell at Vendor",
+	DELETE = "Safe to Delete (No Vendor Value)",
+	REVIEW = "Review by Hand",
+	BANK   = "Bank It (Sentimental / Hard to Reacquire)",
+	AH     = "Auction House Candidates",
 	KEEP   = "Keep",
 }
 
@@ -86,20 +86,22 @@ local BUILTIN_KEEP = {
 -- Sub-groups for the big REVIEW pile, matched against stable substrings of the
 -- reason strings above so like items can be handled in batches.
 local TAG_PATTERNS = {
-	{ "quest item",           "Quest leftovers" },
-	{ "starts a quest",       "Unstarted quests" },
-	{ "utility/novelty",      "Utility & novelty gadgets" },
-	{ "EQUIP IT ONCE",        "Equip for transmog, then sell" },
-	{ "not collectible by",   "Mog locked to another class" },
-	{ "spare bag",            "Spare bags" },
-	{ "outdated soulbound",   "Old gear - check transmog" },
-	{ "BOUND crafting",       "Bound crafting materials" },
-	{ "token/teleport/curio", "Old tokens & curios" },
-	{ "tabard/shirt",         "Tabards & shirts" },
-	{ "last-expansion",       "Last-expansion consumables" },
-	{ "openable",             "Openable containers" },
-	{ "holiday",              "Holiday items" },
-	{ "no current-content",   "Misc old items" },
+	{ "quest item",           "Quest Leftovers" },
+	{ "starts a quest",       "Unstarted Quests" },
+	{ "utility/novelty",      "Utility & Novelty Gadgets" },
+	{ "EQUIP IT ONCE",        "Equip for Transmog, Then Sell" },
+	{ "not collectible by",   "Mog Locked to Another Class" },
+	{ "on-use teleport",      "Teleport Gear" },
+	{ "armor/tier token",     "Tier Tokens" },
+	{ "spare bag",            "Spare Bags" },
+	{ "outdated soulbound",   "Old Gear - Check Transmog" },
+	{ "BOUND crafting",       "Bound Crafting Materials" },
+	{ "token/teleport/curio", "Old Tokens & Curios" },
+	{ "tabard/shirt",         "Tabards & Shirts" },
+	{ "last-expansion",       "Last-Expansion Consumables" },
+	{ "openable",             "Openable Containers" },
+	{ "holiday",              "Holiday Items" },
+	{ "no current-content",   "Misc Old Items" },
 }
 
 local function ReviewTag(reason)
@@ -326,6 +328,13 @@ local function Classify(e)
 		local realIlvl = e.detailedIlvl or e.itemLevel or 0
 		if e.isBound then
 			if isOldXpac(e.expacID) or (BT.equippedIlvl > 0 and realIlvl < BT.equippedIlvl * 0.85) then
+				-- Teleport gear (Cloak of Coordination, Kirin Tor rings...):
+				-- outdated stats, irreplaceable convenience.
+				for _, line in ipairs(e.tooltip or {}) do
+					if line:lower():find("teleport", 1, true) then
+						return "REVIEW", "outdated gear with an on-use teleport - convenience that is hard to replace; keep or bank it rather than selling"
+					end
+				end
 				if NO_APPEARANCE_EQUIP[e.equipLoc or ""] then
 					return "SELL", string.format("outdated jewelry/trinket (ilvl %d vs your %d) - no appearance to lose", realIlvl, BT.equippedIlvl)
 				end
@@ -408,6 +417,11 @@ local function Classify(e)
 		if isOldXpac(e.expacID) and (e.count or 1) == 1
 			and ITEM_UNIQUE and TooltipHasExact(e.tooltip, ITEM_UNIQUE) then
 			return "BANK", ("unique %s keepsake - likely one-time acquisition; bank rather than delete"):format(xpacName(e.expacID))
+		end
+		-- Rare+ "Junk"-subclass items from old raids are usually tier tokens,
+		-- still redeemable at legacy vendors for transmog pieces.
+		if e.subclassID == 0 and isOldXpac(e.expacID) and (e.quality or 1) >= 3 then
+			return "REVIEW", ("likely armor/tier token from %s - many still redeem at legacy vendors for transmog pieces; check before tossing"):format(xpacName(e.expacID))
 		end
 		if isOldXpac(e.expacID) and (e.quality or 1) >= 2 then
 			return "REVIEW", ("old %s item (token/teleport/curio?) - check tooltip; bank if irreplaceable, otherwise toss"):format(xpacName(e.expacID))
