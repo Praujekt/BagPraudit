@@ -2,7 +2,7 @@
 
 Bag audit addon for returning players. Scans every bag slot, classifies each item
 with heuristics tuned for "I just came back and have no idea what any of this is",
-and shows a review window. Built for retail **Midnight** (12.0.7, 12.1-ready).
+and shows a review window. Built for retail **Midnight** (12.1).
 
 Nothing is ever sold or deleted automatically.
 
