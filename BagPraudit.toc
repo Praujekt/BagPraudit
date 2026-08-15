@@ -3,6 +3,7 @@
 ## Notes: Audits your bags after a long break - flags junk, expired consumables, old reagents and orphaned quest items, and tells you what is safe to sell or delete.
 ## Author: Zach
 ## Version: 1.5.1
+## X-License: MIT
 ## SavedVariables: BagPrauditDB
 ## IconTexture: Interface\Icons\INV_Misc_Bag_08
 ## AddonCompartmentFunc: BagPraudit_OnCompartmentClick

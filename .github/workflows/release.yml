@@ -1,0 +1,22 @@
+name: Package and release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: BigWigsMods/packager@v2
+        env:
+          GITHUB_OAUTH: ${{ secrets.GITHUB_TOKEN }}
+          # Set the CF_API_KEY repo secret (from authors.curseforge.com API tokens)
+          # and add "## X-Curse-Project-ID: <id>" to BagPraudit.toc once the
+          # CurseForge project exists; until then this only creates GitHub releases.
+          CF_API_KEY: ${{ secrets.CF_API_KEY }}
